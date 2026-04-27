@@ -1,0 +1,15 @@
+[package]
+name = "bloatshot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+arboard = "3.6.1"
+chrono = "0.4.44"
+clap = { version = "4.6.1", features = ["derive"] }
+eframe = "0.34.1"
+fs2 = "0.4.3"
+image = { version = "0.25.10", features = ["png", "jpeg"] }
+leptess = "0.14.0"
+tempfile = "3.27.0"
