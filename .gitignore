@@ -8,5 +8,5 @@
 # Arch Linux build artifacts
 *.pkg.tar.zst
 /pkg/
-/src/*/
+/src/bloatshot/
 /bloatshot/
