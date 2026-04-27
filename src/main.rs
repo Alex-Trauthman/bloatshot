@@ -120,6 +120,8 @@ fn run_headless_edit() -> Result<()> {
 
 fn run_save(path: &Path) -> Result<()> {
     capture_screenshot(path)?;
+    bloatshot::util::copy_image_to_clipboard(path)?;
+    println!("{}", path.display());
     Ok(())
 }
 

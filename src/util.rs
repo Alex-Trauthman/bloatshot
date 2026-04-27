@@ -74,6 +74,29 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Copies image data to the Wayland clipboard using `wl-copy`.
+pub fn copy_image_to_clipboard(path: &Path) -> Result<()> {
+    let mut child = Command::new("wl-copy")
+        .arg("-t")
+        .arg("image/png")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            anyhow!(
+                "Failed to execute wl-copy: {}. Is wl-clipboard installed?",
+                e
+            )
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let mut file = std::fs::File::open(path)?;
+        std::io::copy(&mut file, &mut stdin)?;
+    }
+
+    child.wait()?;
+    Ok(())
+}
+
 /// Opens the provided path in the default system editor.
 pub fn open_in_editor(path: &Path) -> Result<()> {
     Command::new("xdg-open")
