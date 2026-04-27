@@ -1,4 +1,4 @@
-use crate::ocr::perform_ocr;
+use crate::ocr::perform_ocr_with_semantic;
 use crate::util::{copy_to_clipboard, open_in_editor, send_notification};
 use anyhow::{anyhow, Result};
 use eframe::egui;
@@ -16,6 +16,7 @@ pub enum AppMode {
 #[derive(Clone, Copy)]
 pub enum PendingAction {
     ExtractFull,
+    SemanticFull,
     EditFull,
     SeeImage,
     SaveFull,
@@ -29,8 +30,10 @@ pub struct BloatshotApp {
     ocr_result: Option<String>,
     selection_start: Option<egui::Pos2>,
     selection_end: Option<egui::Pos2>,
-    is_selecting: bool,
+    pub is_selecting: bool,
+    pub semantic_mode: bool,
     pub mode: AppMode,
+
     pub pending_action: Arc<Mutex<Option<PendingAction>>>,
 }
 
@@ -51,6 +54,7 @@ impl BloatshotApp {
             selection_start: None,
             selection_end: None,
             is_selecting: false,
+            semantic_mode: false,
             mode: initial_mode,
             pending_action,
         }
@@ -74,7 +78,11 @@ impl BloatshotApp {
         let sub_path = std::env::temp_dir().join("bloatshot_sub.png");
         sub_img.save(&sub_path)?;
 
-        let text = perform_ocr(&sub_path, &self.lang, self.scale)?;
+        let text = if self.semantic_mode {
+            perform_ocr_with_semantic(&sub_path, &self.lang, self.scale)?
+        } else {
+            crate::ocr::perform_ocr(&sub_path, &self.lang, self.scale)?
+        };
         copy_to_clipboard(&text)?;
         self.ocr_result = Some(text);
 
@@ -98,6 +106,13 @@ impl eframe::App for BloatshotApp {
                 if ui.button("📋 Extract Text").clicked() {
                     let mut action = self.pending_action.lock().unwrap();
                     *action = Some(PendingAction::ExtractFull);
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+
+                ui.add_space(6.0);
+                if ui.button("🧠 Semantic Extract").clicked() {
+                    let mut action = self.pending_action.lock().unwrap();
+                    *action = Some(PendingAction::SemanticFull);
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
 
@@ -157,6 +172,7 @@ impl eframe::App for BloatshotApp {
                         open_in_editor(path).ok();
                     }
                 }
+                ui.checkbox(&mut self.semantic_mode, "🧠 Semantic");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Close").clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);

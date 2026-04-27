@@ -7,6 +7,10 @@ pub struct Args {
     #[arg(short, long)]
     pub extract: bool,
 
+    /// Run OCR with semantic UI detection and copy to clipboard (Headless)
+    #[arg(short, long)]
+    pub semantic: bool,
+
     /// Specify the language for OCR (e.g., "eng", "spa")
     #[arg(short, long, default_value = "eng")]
     pub lang: String,

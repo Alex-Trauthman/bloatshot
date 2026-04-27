@@ -1,6 +1,6 @@
 # Maintainer: Alex Trauthman
 pkgname=bloatshot-git
-pkgver=v0.1.0.r0.0f5f548
+pkgver=v0.1.0.r4.602532b
 pkgrel=1
 pkgdesc="A high-performance, hybrid CLI/GUI OCR screenshot utility for Hyprland"
 arch=('x86_64')

@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use bloatshot::args::Args;
 use bloatshot::gui::{AppMode, BloatshotApp, PendingAction};
-use bloatshot::ocr::perform_ocr;
+use bloatshot::ocr::{perform_ocr, perform_ocr_with_semantic};
 use bloatshot::screenshot::capture_screenshot;
 use bloatshot::util::{get_auto_save_path, open_in_editor, resolve_path, send_notification};
 use clap::Parser;
@@ -21,8 +21,8 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    if args.extract {
-        return run_headless_extract(&args.lang, args.scale);
+    if args.extract || args.semantic {
+        return run_headless_extract(&args.lang, args.scale, args.semantic);
     }
 
     if args.edit {
@@ -65,7 +65,11 @@ fn main() -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(250));
             match action {
                 PendingAction::ExtractFull => {
-                    run_headless_extract(&args.lang, args.scale)?;
+                    run_headless_extract(&args.lang, args.scale, false)?;
+                    break;
+                }
+                PendingAction::SemanticFull => {
+                    run_headless_extract(&args.lang, args.scale, true)?;
                     break;
                 }
                 PendingAction::EditFull => {
@@ -100,10 +104,16 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_headless_extract(lang: &str, scale: f32) -> Result<()> {
+fn run_headless_extract(lang: &str, scale: f32, use_semantic: bool) -> Result<()> {
     let img_path = std::env::temp_dir().join("bloatshot_headless.png");
     capture_screenshot(&img_path)?;
-    let text = perform_ocr(&img_path, lang, scale)?;
+    
+    let text = if use_semantic {
+        perform_ocr_with_semantic(&img_path, lang, scale)?
+    } else {
+        perform_ocr(&img_path, lang, scale)?
+    };
+
     if !text.is_empty() {
         bloatshot::util::copy_to_clipboard(&text)?;
         send_notification("OCR Complete", "Text copied to clipboard", Some(&img_path));

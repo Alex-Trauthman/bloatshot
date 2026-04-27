@@ -13,3 +13,12 @@ fs2 = "0.4.3"
 image = { version = "0.25.10", features = ["png", "jpeg"] }
 leptess = "0.14.0"
 tempfile = "3.27.0"
+ort = "2.0.0-rc.9"
+ndarray = "0.16.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
