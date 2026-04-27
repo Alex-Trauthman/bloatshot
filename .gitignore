@@ -4,3 +4,9 @@
 # Ignore all markdown files except README
 *.md
 !README.md
+
+# Arch Linux build artifacts
+*.pkg.tar.zst
+/pkg/
+/src/
+/bloatshot/
