@@ -1,0 +1,28 @@
+bloatshot
+docs / maes...
+plans / archive
+state
+archive
+.gitignore U
+.workspac... U
+pkg
+bloatshot-git
+bloatshot-git-d...
+src
+args.rs M
+gui.rs M
+lib.rs M
+main.rs M
+ocr.rs 1, M
+screenshot.rs
+util.rs 1, M
+target
+.gitignore
+Cargo.lock M
+Cargo.toml M
+CONTRIBUTING....
+dump_keys.rs U
+GEMINI.md
+LICENSE
+PKGBUILD
+README.md

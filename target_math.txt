@@ -1,0 +1,1 @@
+S = \int_x \left\{ \frac{1}{2} \sum_a \partial^\mu \chi_a \partial_\mu \chi_a + V(\rho) \right\},

@@ -1,9 +1,16 @@
 /target
 **/*.rs.bk
+.venv/
+rust-analyzer.json
 
-# Ignore all markdown files except README
+# Whitelist specific markdown files
 *.md
 !README.md
+!CONTRIBUTING.md
+!contributors.md
+
+# Internal documentation
+/docs/
 
 # Arch Linux build artifacts
 *.pkg.tar.zst

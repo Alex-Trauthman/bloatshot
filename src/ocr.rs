@@ -1,130 +1,363 @@
 use anyhow::{Result, anyhow};
-use image::{GenericImageView, Luma, imageops};
-use leptess::{tesseract, leptonica, capi};
-use std::path::{Path, PathBuf};
-use crate::semantic::{SemanticEngine, UIElement};
+use image::DynamicImage;
+use ocr_rs::{OcrEngine, OcrResult_ as OcrResult};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
-/// Advanced image preprocessing for maximum OCR accuracy.
-/// Uses 3x upscaling, adaptive sharpening, and Otsu-like thresholding.
-pub fn preprocess_image(input_path: &Path, scale: f32) -> Result<PathBuf> {
-    let img = image::open(input_path)
-        .map_err(|e| anyhow!("Failed to open image for preprocessing: {}", e))?;
+fn get_model_path(name: &str) -> Result<PathBuf> {
+    let home = std::env::var("HOME").map_err(|_| anyhow!("HOME env var not set"))?;
+    Ok(PathBuf::from(home)
+        .join(".local/share/bloatshot")
+        .join(name))
+}
 
-    let (width, height) = img.dimensions();
-    
-    // 1. Force a higher minimum scale for small text
-    let effective_scale = if width < 1000 { scale * 1.5 } else { scale };
-    let new_width = (width as f32 * effective_scale) as u32;
-    let new_height = (height as f32 * effective_scale) as u32;
+/// Standard OCR using PP-OCRv5 (multilingual: Chinese, English, Japanese, etc.)
+pub fn perform_standard_ocr_raw(img: &image::DynamicImage) -> Result<Vec<OcrResult>> {
+    let det_path = get_model_path("det.mnn")?;
+    let rec_path = get_model_path("rec.mnn")?;
+    let keys_path = get_model_path("ppocr_keys.txt")?;
 
-    // 2. Grayscale and Upscale with high-quality filter
-    let mut processed = img.grayscale();
-    processed = processed.resize(new_width, new_height, imageops::FilterType::Lanczos3);
+    let engine = OcrEngine::new(
+        det_path.to_str().unwrap(),
+        rec_path.to_str().unwrap(),
+        keys_path.to_str().unwrap(),
+        None,
+    )
+    .map_err(|e| anyhow!("PaddleOCR engine init failed: {:?}", e))?;
 
-    // 3. Adaptive binarization (Enhanced Contrast)
-    let mut luma_img = processed.to_luma8();
-    
-    // Calculate global mean to use as a baseline for Otsu-lite thresholding
-    let mut sum: u64 = 0;
-    for pixel in luma_img.pixels() {
-        sum += pixel[0] as u64;
+    engine
+        .recognize(img)
+        .map_err(|e| anyhow!("PaddleOCR recognition failed: {:?}", e))
+}
+
+pub fn perform_standard_ocr(img: &DynamicImage) -> Result<String> {
+    let results = perform_standard_ocr_raw(img)?;
+    let mut lines: Vec<String> = Vec::new();
+    for result in &results {
+        let text = result.text.trim();
+        if !text.is_empty() {
+            lines.push(text.to_string());
+        }
     }
-    let mean = (sum / (luma_img.width() * luma_img.height()) as u64) as u8;
-    
-    // Apply a slightly aggressive threshold centered around the mean
-    // This helps preserve thin fonts on grey backgrounds
-    let threshold = if mean > 180 { 160 } else if mean < 100 { 100 } else { 128 };
+    Ok(lines.join("\n"))
+}
 
-    for pixel in luma_img.pixels_mut() {
-        if pixel[0] > threshold {
-            *pixel = Luma([255]);
-        } else {
-            *pixel = Luma([0]);
+/// Math/LaTeX OCR using RapidLaTeXOCR (ViT encoder + transformer decoder)
+pub fn perform_semantic_ocr(img: &DynamicImage) -> Result<String> {
+    use ort::session::Session;
+    use ort::value::Tensor;
+
+    // Load tokenizer vocabulary (id -> token mapping)
+    let tokenizer_path = get_model_path("math_tokenizer.json")?;
+    let tokenizer_json = std::fs::read_to_string(&tokenizer_path)
+        .map_err(|e| anyhow!("Failed to read tokenizer: {}", e))?;
+    let tokenizer: serde_json::Value = serde_json::from_str(&tokenizer_json)
+        .map_err(|e| anyhow!("Failed to parse tokenizer JSON: {}", e))?;
+
+    // Build id-to-token map from vocab
+    let vocab = tokenizer["model"]["vocab"]
+        .as_object()
+        .ok_or_else(|| anyhow!("Invalid tokenizer: missing model.vocab"))?;
+    let mut id_to_token: HashMap<i64, String> = HashMap::new();
+    for (token, id) in vocab {
+        if let Some(id_num) = id.as_i64() {
+            id_to_token.insert(id_num, token.clone());
         }
     }
 
-    let output_path = input_path.with_extension("processed.png");
-    luma_img
-        .save(&output_path)
-        .map_err(|e| anyhow!("Failed to save processed image: {}", e))?;
+    let bos_id: i64 = 1; // [BOS]
+    let eos_id: i64 = 2; // [EOS]
+    let max_len: usize = 512;
+    let decoder_vocab_size: usize = 8000; // from model output shape
 
-    Ok(output_path)
-}
+    // Load ONNX models
+    let mut encoder = Session::builder()?.commit_from_file(get_model_path("math_encoder.onnx")?)?;
+    let mut decoder = Session::builder()?.commit_from_file(get_model_path("math_decoder.onnx")?)?;
 
-/// Runs Tesseract OCR on the provided image path and uses SemanticEngine to classify regions.
-pub fn perform_ocr_with_semantic(img_path: &Path, lang: &str, scale: f32) -> Result<String> {
-    let original_img = image::open(img_path)
-        .map_err(|e| anyhow!("Failed to open original image: {}", e))?;
-    
-    let processed_path = preprocess_image(img_path, scale)?;
-    let mut api = tesseract::TessApi::new(None, lang)
-        .map_err(|e| anyhow!("Failed to initialize Tesseract: {}", e))?;
+    // Preprocess: convert to grayscale, resize to fit within position embedding limits
+    // Encoder expects 1-channel input, max ~504 position embeddings
+    // Height=64 works well for math formulas; width scales by aspect ratio (max ~480)
+    let gray = img.to_luma8();
+    let (orig_w, orig_h) = gray.dimensions();
+    let target_h: u32 = 64;
+    let target_w: u32 = ((orig_w as f32 / orig_h as f32) * target_h as f32).round() as u32;
+    // Round to nearest multiple of 32 (encoder patch size requirement)
+    let target_w = ((target_w + 15) / 32 * 32).clamp(32, 480);
 
-    let pix = leptonica::pix_read(&processed_path)
-        .map_err(|e| anyhow!("Failed to read image for OCR: {}", e))?;
+    let resized = image::imageops::resize(
+        &gray,
+        target_w,
+        target_h,
+        image::imageops::FilterType::Lanczos3,
+    );
 
-    api.set_image(&pix);
-    
-    let level = capi::TessPageIteratorLevel_RIL_TEXTLINE;
-    let component_boxa = api.get_component_images(level, true)
-        .ok_or_else(|| anyhow!("Failed to extract text components"))?;
+    // Normalize to [-1, 1] and pack into NCHW tensor
+    let mut pixel_data: Vec<f32> = Vec::with_capacity((target_h * target_w) as usize);
+    for y in 0..target_h {
+        for x in 0..target_w {
+            let val = resized.get_pixel(x, y)[0] as f32 / 255.0;
+            pixel_data.push(val * 2.0 - 1.0); // normalize to [-1, 1]
+        }
+    }
 
-    let semantic_engine = SemanticEngine::new()?;
-    let mut final_output = String::new();
+    // Encoder input: "input" with shape [1, 1, H, W] (grayscale)
+    let input_tensor = Tensor::from_array((
+        [1usize, 1, target_h as usize, target_w as usize],
+        pixel_data,
+    ))?;
+    let encoder_outputs = encoder.run(ort::inputs!["input" => input_tensor])?;
 
-    let count = component_boxa.get_n();
-    for i in 0..count {
-        if let Some(box_) = component_boxa.get_box(i) {
-            let mut x = 0;
-            let mut y = 0;
-            let mut w = 0;
-            let mut h = 0;
-            box_.get_geometry(Some(&mut x), Some(&mut y), Some(&mut w), Some(&mut h));
-            
-            // Map back to original image scale for semantic analysis
-            // We use the same 'effective_scale' logic here to stay in sync
-            let img_w = original_img.width();
-            let actual_scale = if img_w < 1000 { scale * 1.5 } else { scale };
+    // Encoder output: shape [1, seq_len, 256]
+    let context_tensor = &encoder_outputs[0];
+    let context_extracted = context_tensor.try_extract_tensor::<f32>()?;
+    let context_shape = &context_extracted.0;
+    let context_data = context_extracted.1;
+    let context_seq_len = context_shape[1] as usize;
+    let context_hidden = context_shape[2] as usize;
 
-            let orig_x = (x as f32 / actual_scale) as u32;
-            let orig_y = (y as f32 / actual_scale) as u32;
-            let orig_w = (w as f32 / actual_scale) as u32;
-            let orig_h = (h as f32 / actual_scale) as u32;
+    // Autoregressive decoding
+    let mut generated_ids: Vec<i64> = vec![bos_id];
 
-            let element_type = semantic_engine.classify_region(&original_img, orig_x, orig_y, orig_w, orig_h);
+    for _ in 0..max_len {
+        let seq_len = generated_ids.len();
 
-            api.set_image(&pix);
-            api.set_rectangle(x, y, w, h);
-            let text = api.get_utf8_text()?.trim().to_string();
+        // Decoder input "x": token ids [1, seq_len] (INT64)
+        let x_tensor = Tensor::from_array(([1usize, seq_len], generated_ids.clone()))?;
 
-            if !text.is_empty() {
-                match element_type {
-                    UIElement::Text => final_output.push_str(&format!("{}\n", text)),
-                    _ => final_output.push_str(&format!("[{}] \"{}\"\n", element_type.as_label(), text)),
-                }
+        // Decoder input "mask": attention mask [1, seq_len] (BOOL - all true)
+        let mask_data: Vec<bool> = vec![true; seq_len];
+        let mask_tensor = Tensor::from_array(([1usize, seq_len], mask_data))?;
+
+        // Decoder input "context": encoder hidden states (FLOAT)
+        let context_copy = Tensor::from_array((
+            [1usize, context_seq_len, context_hidden],
+            context_data.to_vec(),
+        ))?;
+
+        let decoder_outputs = decoder.run(ort::inputs![
+            "x" => x_tensor,
+            "mask" => mask_tensor,
+            "context" => context_copy
+        ])?;
+
+        // Output shape: [1, seq_len, 8000]
+        let logits_extracted = decoder_outputs[0].try_extract_tensor::<f32>()?;
+        let logits_data = logits_extracted.1;
+
+        // Get logits for the last token position
+        let offset = (seq_len - 1) * decoder_vocab_size;
+
+        // Greedy argmax decoding
+        let mut best_id: i64 = 0;
+        let mut best_val = f32::NEG_INFINITY;
+        for v in 0..decoder_vocab_size {
+            let val = logits_data[offset + v];
+            if val > best_val {
+                best_val = val;
+                best_id = v as i64;
             }
         }
+
+        if best_id == eos_id {
+            break;
+        }
+        generated_ids.push(best_id);
     }
 
-    if final_output.is_empty() {
-        api.set_image(&pix);
-        return Ok(api.get_utf8_text()?.trim().to_string());
+    // Decode tokens to LaTeX string (skip BOS)
+    // Clean BPE spacing tokens (Ġ = \u0120 = space in GPT-style BPE)
+    let mut latex = String::new();
+    for &id in &generated_ids[1..] {
+        if let Some(token) = id_to_token.get(&id) {
+            let clean = token.replace('\u{0120}', " ");
+            latex.push_str(&clean);
+        }
     }
 
-    Ok(final_output.trim().to_string())
+    Ok(latex.trim().to_string())
 }
 
-/// Simple OCR without semantic classification.
-pub fn perform_ocr(img_path: &Path, lang: &str, scale: f32) -> Result<String> {
-    let processed_path = preprocess_image(img_path, scale)?;
-    let mut api = tesseract::TessApi::new(None, lang)
-        .map_err(|e| anyhow!("Failed to initialize Tesseract: {}", e))?;
+/// Table OCR — uses standard PaddleOCR with a heuristic to reconstruct the table structure.
+pub fn perform_table_ocr(img: &DynamicImage) -> Result<String> {
+    let results = perform_standard_ocr_raw(img)?;
+    if results.is_empty() {
+        return Ok("".to_string());
+    }
 
-    let pix = leptonica::pix_read(&processed_path)
-        .map_err(|e| anyhow!("Failed to read image for OCR: {}", e))?;
+    // Heuristic: Group results into rows by their Y-coordinate.
+    // We use a small threshold to allow for slight misalignments.
+    let mut rows: Vec<Vec<&OcrResult>> = Vec::new();
+    let mut sorted_results: Vec<&OcrResult> = results.iter().collect();
+    // Sort by Y first, then X.
+    sorted_results.sort_by(|a, b| {
+        let ay = a.bbox.rect.top();
+        let by = b.bbox.rect.top();
+        if (ay - by).abs() < 5 {
+            a.bbox.rect.left().partial_cmp(&b.bbox.rect.left()).unwrap()
+        } else {
+            ay.partial_cmp(&by).unwrap()
+        }
+    });
 
-    api.set_image(&pix);
-    let text = api.get_utf8_text()?.trim().to_string();
+    for result in sorted_results {
+        if let Some(last_row) = rows.last_mut() {
+            let row_y = last_row[0].bbox.rect.top();
+            if (result.bbox.rect.top() - row_y).abs() < 10 {
+                last_row.push(result);
+                continue;
+            }
+        }
+        rows.push(vec![result]);
+    }
 
-    Ok(text)
+    // Format as Markdown table
+    let mut markdown = String::new();
+    for (i, row) in rows.iter().enumerate() {
+        let row_text: Vec<String> = row.iter().map(|r| r.text.trim().to_string()).collect();
+        markdown.push_str("| ");
+        markdown.push_str(&row_text.join(" | "));
+        markdown.push_str(" |\n");
+
+        if i == 0 {
+            // Add separator
+            markdown.push('|');
+            for _ in 0..row.len() {
+                markdown.push_str(" --- |");
+            }
+            markdown.push('\n');
+        }
+    }
+
+    Ok(markdown)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_extract_ocr_on_stock_image() {
+        // Tests `bloatshot -e` functionality
+        crate::util::ensure_onnx_models().expect("Failed to download models");
+
+        let home = std::env::var("HOME").expect("HOME env var not set");
+        let image_path = PathBuf::from(&home).join("bloatshots/2026-04-28/22-46-44.png");
+        let target_path = PathBuf::from(&home).join("bloatshot/target.txt");
+
+        if !image_path.exists() || !target_path.exists() {
+            println!("Test skipped: stock image or target.txt not found");
+            return;
+        }
+
+        let expected = fs::read_to_string(&target_path).expect("Failed to read target.txt");
+        let img = image::open(&image_path).expect("Failed to open test image");
+
+        let result = perform_standard_ocr(&img).expect("perform_standard_ocr failed");
+
+        println!("--- EXPECTED (from target.txt) ---");
+        println!("{}", expected);
+        println!("\n--- ACTUAL (-e standard OCR) ---");
+        println!("{}", result);
+
+        assert!(!result.is_empty(), "OCR produced empty string!");
+        assert!(
+            result.to_lowercase().contains("bloatshot"),
+            "OCR output missing 'bloatshot'. Got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_math_ocr_on_formula_image() {
+        // Tests `bloatshot -m` functionality with a real LaTeX formula
+        crate::util::ensure_onnx_models().expect("Failed to download models");
+
+        let home = std::env::var("HOME").expect("HOME env var not set");
+        let image_path = PathBuf::from(&home).join("bloatshots/2026-04-28/23-27-49.png");
+        let target_path = PathBuf::from(&home).join("bloatshot/target_math.txt");
+
+        if !image_path.exists() {
+            println!("Test skipped: math formula image not found");
+            return;
+        }
+
+        let img = image::open(&image_path).expect("Failed to open test image");
+        let result = perform_semantic_ocr(&img).expect("perform_semantic_ocr failed");
+
+        println!("\n--- ACTUAL (-m math OCR) ---");
+        println!("{}", result);
+
+        if target_path.exists() {
+            let expected =
+                fs::read_to_string(&target_path).expect("Failed to read target_math.txt");
+            println!("--- EXPECTED (from target_math.txt) ---");
+            println!("{}", expected);
+        }
+
+        assert!(!result.is_empty(), "Math OCR produced empty string!");
+        // Check for key LaTeX elements in the formula
+        assert!(
+            result.contains("\\int") || result.contains("\\sum") || result.contains("\\frac"),
+            "Math OCR output missing LaTeX commands. Got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_semantic_ocr_fallback_on_text() {
+        // Tests that `-m` also works on regular text images (falls back gracefully)
+        crate::util::ensure_onnx_models().expect("Failed to download models");
+
+        let home = std::env::var("HOME").expect("HOME env var not set");
+        let image_path = PathBuf::from(&home).join("bloatshots/2026-04-28/22-46-44.png");
+
+        if !image_path.exists() {
+            println!("Test skipped: stock image not found");
+            return;
+        }
+
+        let img = image::open(&image_path).expect("Failed to open test image");
+        // Math OCR on a non-math image should still produce something (even if garbled)
+        let result = perform_semantic_ocr(&img);
+        assert!(
+            result.is_ok(),
+            "Semantic OCR crashed on text image: {:?}",
+            result.err()
+        );
+
+        println!("\n--- ACTUAL (-m on text image, should be LaTeX-ish) ---");
+        println!("{}", result.unwrap());
+    }
+
+    #[test]
+    fn test_table_ocr_on_sample_image() {
+        // Tests `bloatshot -t` functionality
+        crate::util::ensure_onnx_models().expect("Failed to download models");
+
+        let home = std::env::var("HOME").expect("HOME env var not set");
+        let image_path = PathBuf::from(&home).join("bloatshots/2026-04-28/table_test.jpg");
+
+        if !image_path.exists() {
+            println!("Test skipped: table test image not found");
+            return;
+        }
+
+        let img = image::open(&image_path).expect("Failed to open test image");
+        let result = perform_table_ocr(&img).expect("perform_table_ocr failed");
+
+        println!("\n--- ACTUAL (-t table OCR) ---");
+        println!("{}", result);
+
+        assert!(!result.is_empty(), "Table OCR produced empty string!");
+        assert!(
+            result.contains("|"),
+            "Table OCR output missing Markdown pipe characters!"
+        );
+        assert!(
+            result.to_lowercase().contains("alice"),
+            "Table OCR output missing 'Alice'!"
+        );
+    }
 }

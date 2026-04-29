@@ -6,12 +6,12 @@ use std::process::Command;
 
 /// Resolves paths starting with `~/` to absolute paths.
 pub fn resolve_path(path: &str) -> PathBuf {
-    if path.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            let mut resolved = PathBuf::from(home);
-            resolved.push(&path[2..]);
-            return resolved;
-        }
+    if path.starts_with("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        let mut resolved = PathBuf::from(home);
+        resolved.push(path.strip_prefix("~/").unwrap());
+        return resolved;
     }
     PathBuf::from(path)
 }
@@ -103,5 +103,70 @@ pub fn open_in_editor(path: &Path) -> Result<()> {
         .arg(path)
         .spawn()
         .map_err(|e| anyhow!("Failed to open editor: {}", e))?;
+    Ok(())
+}
+
+/// Ensures the ONNX OCR models exist in ~/.local/share/bloatshot/
+pub fn ensure_onnx_models() -> Result<()> {
+    let home = std::env::var("HOME").map_err(|_| anyhow!("HOME env var not set"))?;
+    let model_dir = PathBuf::from(home).join(".local/share/bloatshot");
+    std::fs::create_dir_all(&model_dir)?;
+
+    let files = [
+        (
+            "det.mnn",
+            "https://github.com/zibo-chen/rust-paddle-ocr/raw/main/models/PP-OCRv5_mobile_det.mnn",
+        ),
+        (
+            "rec.mnn",
+            "https://github.com/zibo-chen/rust-paddle-ocr/raw/main/models/PP-OCRv5_mobile_rec.mnn",
+        ),
+        (
+            "ppocr_keys.txt",
+            "https://github.com/zibo-chen/rust-paddle-ocr/raw/main/models/ppocr_keys_v5.txt",
+        ),
+        (
+            "table.onnx",
+            "https://huggingface.co/SWHL/RapidStructure/resolve/main/table/en_ppstructure_mobile_v2_SLANet.onnx",
+        ),
+        (
+            "math_encoder.onnx",
+            "https://github.com/RapidAI/RapidLaTeXOCR/releases/download/v0.0.0/encoder.onnx",
+        ),
+        (
+            "math_decoder.onnx",
+            "https://github.com/RapidAI/RapidLaTeXOCR/releases/download/v0.0.0/decoder.onnx",
+        ),
+        (
+            "math_tokenizer.json",
+            "https://github.com/RapidAI/RapidLaTeXOCR/releases/download/v0.0.0/tokenizer.json",
+        ),
+    ];
+
+    for (name, url) in files {
+        let path = model_dir.join(name);
+        // Only skip if file exists AND is larger than 1KB (avoid broken downloads)
+        let exists_and_valid =
+            path.exists() && std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > 1024;
+
+        if !exists_and_valid {
+            println!("Downloading/Updating {}...", name);
+            let status = Command::new("curl")
+                .arg("-L")
+                .arg("-o")
+                .arg(&path)
+                .arg(url)
+                .status()
+                .map_err(|e| anyhow!("Failed to execute curl: {}", e))?;
+
+            if !status.success() {
+                return Err(anyhow!(
+                    "Failed to download {}. Check internet connection or URL.",
+                    name
+                ));
+            }
+        }
+    }
+
     Ok(())
 }

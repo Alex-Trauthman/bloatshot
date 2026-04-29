@@ -1,7 +1,7 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bloatshot::args::Args;
 use bloatshot::gui::{AppMode, BloatshotApp, PendingAction};
-use bloatshot::ocr::{perform_ocr, perform_ocr_with_semantic};
+use bloatshot::ocr::{perform_semantic_ocr, perform_standard_ocr, perform_table_ocr};
 use bloatshot::screenshot::capture_screenshot;
 use bloatshot::util::{get_auto_save_path, open_in_editor, resolve_path, send_notification};
 use clap::Parser;
@@ -21,8 +21,9 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    if args.extract || args.semantic {
-        return run_headless_extract(&args.lang, args.scale, args.semantic);
+    if args.extract || args.semantic || args.table {
+        bloatshot::util::ensure_onnx_models()?;
+        return run_headless_extract(&args);
     }
 
     if args.edit {
@@ -50,11 +51,12 @@ fn main() -> Result<()> {
     let mut current_mode = AppMode::Menu;
     let mut current_image: Option<PathBuf> = None;
 
+    // Ensure model exists before starting GUI
+    bloatshot::util::ensure_onnx_models()?;
+
     loop {
         let pending_action = Arc::new(Mutex::new(None));
         run_gui(
-            args.lang.clone(),
-            args.scale,
             Arc::clone(&pending_action),
             current_mode,
             current_image.clone(),
@@ -64,12 +66,16 @@ fn main() -> Result<()> {
         if let Some(action) = action {
             std::thread::sleep(std::time::Duration::from_millis(250));
             match action {
-                PendingAction::ExtractFull => {
-                    run_headless_extract(&args.lang, args.scale, false)?;
-                    break;
-                }
-                PendingAction::SemanticFull => {
-                    run_headless_extract(&args.lang, args.scale, true)?;
+                PendingAction::ExtractFull
+                | PendingAction::SemanticFull
+                | PendingAction::TableFull => {
+                    let mut override_args = args.clone();
+                    if matches!(action, PendingAction::SemanticFull) {
+                        override_args.semantic = true;
+                    } else if matches!(action, PendingAction::TableFull) {
+                        override_args.table = true;
+                    }
+                    run_headless_extract(&override_args)?;
                     break;
                 }
                 PendingAction::EditFull => {
@@ -104,14 +110,26 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_headless_extract(lang: &str, scale: f32, use_semantic: bool) -> Result<()> {
-    let img_path = std::env::temp_dir().join("bloatshot_headless.png");
-    capture_screenshot(&img_path)?;
-    
-    let text = if use_semantic {
-        perform_ocr_with_semantic(&img_path, lang, scale)?
+fn run_headless_extract(args: &Args) -> Result<()> {
+    let img_path = if let Some(input) = &args.input {
+        std::path::PathBuf::from(input)
     } else {
-        perform_ocr(&img_path, lang, scale)?
+        let path = std::env::temp_dir().join("bloatshot_headless.png");
+        capture_screenshot(&path)?;
+        path
+    };
+
+    let img = image::open(&img_path).map_err(|e| anyhow!("Failed to open screenshot: {}", e))?;
+
+    let text = if args.semantic {
+        println!("Initializing Math/LaTeX OCR engine...");
+        perform_semantic_ocr(&img)?
+    } else if args.table {
+        println!("Initializing Table OCR engine...");
+        perform_table_ocr(&img)?
+    } else {
+        println!("Initializing Standard OCR engine (PaddleOCR v5)...");
+        perform_standard_ocr(&img)?
     };
 
     if !text.is_empty() {
@@ -136,8 +154,6 @@ fn run_save(path: &Path) -> Result<()> {
 }
 
 fn run_gui(
-    lang: String,
-    scale: f32,
     pending_action: Arc<Mutex<Option<PendingAction>>>,
     initial_mode: AppMode,
     initial_image: Option<PathBuf>,
@@ -160,7 +176,7 @@ fn run_gui(
     eframe::run_native(
         "Bloatshot",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             let mut style = (*cc.egui_ctx.global_style()).clone();
 
             style.visuals.window_corner_radius = egui::CornerRadius::same(8);
@@ -175,8 +191,6 @@ fn run_gui(
             cc.egui_ctx.set_global_style(style);
 
             Ok(Box::new(BloatshotApp::new(
-                lang,
-                scale,
                 pending_action,
                 initial_mode,
                 initial_image,

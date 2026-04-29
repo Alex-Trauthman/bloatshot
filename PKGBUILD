@@ -1,12 +1,12 @@
 # Maintainer: Alex Trauthman
 pkgname=bloatshot-git
-pkgver=v0.1.0.r4.602532b
+pkgver=v0.1.0.r5.5f83872
 pkgrel=1
 pkgdesc="A high-performance, hybrid CLI/GUI OCR screenshot utility for Hyprland"
 arch=('x86_64')
 url="https://github.com/Alex-Trauthman/bloatshot"
 license=('MIT')
-depends=('tesseract' 'tesseract-data-eng' 'tesseract-data-por' 'grim' 'slurp' 'wl-clipboard' 'libnotify')
+depends=('grim' 'slurp' 'wl-clipboard' 'libnotify' 'onnxruntime')
 makedepends=('rust' 'cargo' 'clang' 'git')
 provides=('bloatshot')
 conflicts=('bloatshot')
@@ -18,8 +18,14 @@ pkgver() {
   git describe --long --tags | sed 's/\([^-]*-\)g/r\1/;s/-/./g'
 }
 
+prepare() {
+  cd "bloatshot"
+  export ORT_STRATEGY=system
+}
+
 build() {
   cd "bloatshot"
+  export ORT_STRATEGY=system
   cargo build --release --locked
 }
 
