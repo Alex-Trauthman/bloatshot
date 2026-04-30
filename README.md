@@ -1,85 +1,78 @@
 # Bloatshot
 
-A high-performance, hybrid CLI/GUI OCR screenshot utility specifically designed for Arch Linux and Hyprland.
+A high-performance, professional-grade OCR screenshot utility specifically optimized for Arch Linux and Wayland/Hyprland.
 
-Bloatshot bridges the gap between minimalist shell scripts and heavy GUI applications. Built in Rust, it provides a fast, interactive menu for common screenshot tasks while remaining fully scriptable via command-line flags.
+Bloatshot bridges the gap between minimalist shell scripts and heavy GUI applications. Built in Rust and powered by state-of-the-art transformer models, it provides "Paper Perfect" extraction of standard text, mathematical formulas, and complex tables.
 
 ## Key Features
 
-- **Hybrid Interface**: Use the interactive GUI menu for manual tasks or headless flags for keyboard shortcuts.
-- **Integrated OCR**: Extracts text from any screen region using the Tesseract engine.
-- **Image Pre-processing**: Automatically applies grayscale conversion, upscaling, and binarization to maximize OCR accuracy.
-- **Organized Storage**: Automatically saves screenshots into timestamped directories (`~/bloatshots/YYYY-MM-DD/`).
-- **Rich Notifications**: Sends system notifications with image previews and file paths.
-- **Wayland Native**: Built specifically for Wayland/Hyprland using `grim` and `slurp`.
-- **Minimalist Aesthetic**: Features a compact, rounded UI that integrates seamlessly with modern tiling window managers.
+- **Multi-Modal OCR Excellence**:
+    - **Standard Text**: Powered by PaddleOCR v5 for robust layout preservation.
+    - **Math/LaTeX**: Powered by RapidLaTeXOCR (Transformer-based) with automatic `\left/\right` scaling for "Paper Perfect" professional typesetting.
+    - **Table Intelligence**: Automatically detects and formats tables into balanced Markdown structures.
+- **Hardware Accelerated**: Leverages MNN and ONNX Runtime for blazing-fast inference directly on your CPU/GPU.
+- **Interactive & Headless**: Use the stunning interactive GUI for manual tasks or optimized flags for lightning-fast keyboard shortcuts.
+- **Wayland Native**: Optimized for `grim` and `slurp` with clipboard integration via `wl-copy`.
+- **Hybrid Viewer**: Inspect the last capture and perform targeted sub-region OCR instantly.
 
-## Prerequisites
+## Base Tools & Dependencies
 
-Ensure the following dependencies are installed on your system:
+Bloatshot relies on these core tools to function:
 
-- `grim` (Screenshot capture)
-- `slurp` (Region selection)
-- `tesseract` & `tesseract-data-eng` (OCR engine)
-- `wl-clipboard` (Wayland clipboard support)
-- `libnotify` (For notifications)
+- **Screenshot & Region Selection**: `grim`, `slurp`
+- **Image Processing**: `ImageMagick` (via Rust bindings), `imageproc`
+- **Clipboard**: `wl-clipboard`
+- **Notifications**: `libnotify`
+- **Inference Engines**: `onnxruntime`, `MNN`
+- **OCR Libraries**: `ocr-rs` (Standard), `ort` (Math/Table)
 
 ## Installation
 
-### From Source (Recommended for Developers)
+### Using PKGBUILD (Recommended)
+
+```bash
+# Clone the repository and build the Arch package
+makepkg -si
+```
+
+### From Source
 
 ```bash
 cargo install --path .
 ```
 
-*Note: Ensure `~/.cargo/bin` is in your PATH.*
+## Usage
 
-### Using PKGBUILD (Standard Arch Way)
+### Headless Shortcuts (Recommended for Keybinds)
 
-```bash
-makepkg -si
-```
+- `bloatshot --extract` (`-e`): Capture region and copy **Standard Text** to clipboard.
+- `bloatshot --semantic` (`-m`): Capture region and copy **Math/LaTeX** (Paper Perfect) to clipboard.
+- `bloatshot --table` (`-t`): Capture region and copy **Markdown Table** to clipboard.
+- `bloatshot --edit` (`-E`): Capture region and open immediately in your default editor.
 
-This installs the binary to `/usr/bin/bloatshot`, making it available system-wide.
+### Interactive Menu
 
-## Hyprland Configuration (2026 Syntax)
+Simply run `bloatshot` to open the GUI.
+- **Escape** or the **Close** button exits the app.
+- **Save** button copies the capture to the clipboard and saves it to your directory.
 
-To ensure the interactive menu appears as a floating utility window, add these rules to your `hyprland.conf`:
+## Hyprland Configuration
+
+To ensure the utility menu behaves correctly as a floating tool, add these rules to your `hyprland.conf`:
 
 ```ini
-# Bloatshot Window Rules
+# Bloatshot Floating Rules
 windowrule = match:class ^(Bloatshot)$, float on
 windowrule = match:class ^(Bloatshot)$, center on
 windowrule = match:class ^(Bloatshot)$, stay_focused on
 windowrule = match:class ^(Bloatshot)$, pin on
 
-# Keybinds
+# Recommended Keybind Example
 bind = $mainMod, B, exec, bloatshot
 bind = $mainMod SHIFT, S, exec, bloatshot --dir ~/bloatshots
-bind = $mainMod ALT, S, exec, bloatshot -l eng+por --extract
 ```
 
-## Usage
+---
 
-### Interactive Mode
-
-Running `bloatshot` without action flags opens the utility menu:
-
-1. **Extract Text**: Select an area to run OCR and copy text to the clipboard.
-2. **Save Image**: Select an area to save a timestamped screenshot to `~/bloatshots`.
-3. **Edit Image**: Select an area and immediately open it in your default image editor.
-4. **See Image**: Select an area to preview the capture and perform sub-region OCR.
-
-### Command Line Flags
-
-- `--extract`: Capture a region and copy OCR text immediately.
-- `--edit`: Capture a region and open in the default editor.
-- `--save <path>`: Save capture to a specific file.
-- `--dir <path>`: Save capture to a specific directory using auto-naming.
-- `--defaultfolder <path>`: Override the default `~/bloatshots` base directory.
-- `--lang <lang>`: Set the OCR language (default: `eng`).
-- `--scale <factor>`: Set the pre-processing upscale factor (default: `2.0`).
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+**Version 0.1.0**  
+*Built for the Arch Linux community.*

@@ -94,7 +94,7 @@ impl BloatshotApp {
 
     fn draw_menu(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
-            ui.heading("🚀 Bloatshot");
+            ui.heading("Bloatshot");
             ui.add_space(10.0);
 
             ui.group(|ui| {
@@ -140,6 +140,19 @@ impl BloatshotApp {
                     *action = Some(PendingAction::SeeImage);
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                if ui.button("❌ Close").clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+
+            ui.add_space(ui.available_height() - 20.0);
+            ui.vertical_centered(|ui| {
+                ui.small(format!("v{}", env!("CARGO_PKG_VERSION")));
             });
         });
     }
@@ -227,15 +240,31 @@ impl BloatshotApp {
 
             if let Some(text) = &self.ocr_result {
                 ui.add_space(10.0);
-                ui.label("OCR Result (copied):");
+                ui.horizontal(|ui| {
+                    ui.label("OCR Result:");
+                    if ui.button("📋 Copy").clicked() {
+                        copy_to_clipboard(text).ok();
+                        send_notification("Copied", "Text copied to clipboard", None);
+                    }
+                });
                 ui.code(text);
             }
+
+            ui.add_space(ui.available_height() - 20.0);
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                ui.add_space(5.0);
+                ui.small(format!("v{}", env!("CARGO_PKG_VERSION")));
+            });
         });
     }
 }
 
 impl eframe::App for BloatshotApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
         match self.mode {
             AppMode::Menu => self.draw_menu(ui),
             AppMode::Viewer => self.draw_viewer(ui),

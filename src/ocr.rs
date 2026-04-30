@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView};
 use ocr_rs::{OcrEngine, OcrResult_ as OcrResult};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -32,14 +32,58 @@ pub fn perform_standard_ocr_raw(img: &image::DynamicImage) -> Result<Vec<OcrResu
 
 pub fn perform_standard_ocr(img: &DynamicImage) -> Result<String> {
     let results = perform_standard_ocr_raw(img)?;
-    let mut lines: Vec<String> = Vec::new();
-    for result in &results {
-        let text = result.text.trim();
-        if !text.is_empty() {
-            lines.push(text.to_string());
-        }
+    if results.is_empty() {
+        return Ok("".to_string());
     }
-    Ok(lines.join("\n"))
+
+    // Group results into rows by their Y-coordinate to preserve layout
+    let mut rows: Vec<Vec<&OcrResult>> = Vec::new();
+    let mut sorted_results: Vec<&OcrResult> = results.iter().collect();
+    // Sort by Y first, then X.
+    sorted_results.sort_by(|a, b| {
+        let ay = a.bbox.rect.top();
+        let by = b.bbox.rect.top();
+        if (ay - by).abs() < 8 {
+            a.bbox.rect.left().partial_cmp(&b.bbox.rect.left()).unwrap()
+        } else {
+            ay.partial_cmp(&by).unwrap()
+        }
+    });
+
+    for result in sorted_results {
+        if let Some(last_row) = rows.last_mut() {
+            let row_y = last_row[0].bbox.rect.top();
+            if (result.bbox.rect.top() - row_y).abs() < 12 {
+                last_row.push(result);
+                continue;
+            }
+        }
+        rows.push(vec![result]);
+    }
+
+    let mut output = String::new();
+    for row in rows {
+        let mut row_text = String::new();
+        let mut last_right = -1;
+        
+        for (j, res) in row.iter().enumerate() {
+            let left = res.bbox.rect.left();
+            if j > 0 {
+                let gap = left - last_right;
+                if gap > 25 {
+                    row_text.push('\t');
+                } else {
+                    row_text.push(' ');
+                }
+            }
+            row_text.push_str(res.text.trim());
+            last_right = res.bbox.rect.right();
+        }
+        output.push_str(&row_text);
+        output.push('\n');
+    }
+
+    Ok(output.trim().to_string())
 }
 
 /// Math/LaTeX OCR using RapidLaTeXOCR (ViT encoder + transformer decoder)
@@ -74,15 +118,23 @@ pub fn perform_semantic_ocr(img: &DynamicImage) -> Result<String> {
     let mut encoder = Session::builder()?.commit_from_file(get_model_path("math_encoder.onnx")?)?;
     let mut decoder = Session::builder()?.commit_from_file(get_model_path("math_decoder.onnx")?)?;
 
-    // Preprocess: convert to grayscale, resize to fit within position embedding limits
-    // Encoder expects 1-channel input, max ~504 position embeddings
-    // Height=64 works well for math formulas; width scales by aspect ratio (max ~480)
+    // Crop 2 pixels from edges to remove potential selection/window borders
+    let (orig_w, orig_h) = img.dimensions();
+    let img = if orig_w > 10 && orig_h > 10 {
+        DynamicImage::ImageRgba8(img.view(2, 2, orig_w - 4, orig_h - 4).to_image())
+    } else {
+        img.clone()
+    };
+
+    // Preprocess: convert to grayscale
     let gray = img.to_luma8();
-    let (orig_w, orig_h) = gray.dimensions();
+    let (w, h) = gray.dimensions();
+
+    // Resize to height 64 while maintaining aspect ratio
     let target_h: u32 = 64;
-    let target_w: u32 = ((orig_w as f32 / orig_h as f32) * target_h as f32).round() as u32;
+    let target_w: u32 = ((w as f32 / h as f32) * target_h as f32).round() as u32;
     // Round to nearest multiple of 32 (encoder patch size requirement)
-    let target_w = ((target_w + 15) / 32 * 32).clamp(32, 480);
+    let target_w = ((target_w + 31) / 32 * 32).clamp(32, 512);
 
     let resized = image::imageops::resize(
         &gray,
@@ -165,16 +217,65 @@ pub fn perform_semantic_ocr(img: &DynamicImage) -> Result<String> {
     }
 
     // Decode tokens to LaTeX string (skip BOS)
-    // Clean BPE spacing tokens (Ġ = \u0120 = space in GPT-style BPE)
     let mut latex = String::new();
     for &id in &generated_ids[1..] {
         if let Some(token) = id_to_token.get(&id) {
-            let clean = token.replace('\u{0120}', " ");
+            let clean = token.replace('\u{0120}', ""); // Remove BPE space markers
             latex.push_str(&clean);
         }
     }
 
-    Ok(latex.trim().to_string())
+    // Post-process: carefully remove spaces while preserving them after backslash commands if no brace follows
+    let mut cleaned = String::new();
+    let chars: Vec<char> = latex.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == ' ' {
+            // Only keep space if it follows a command word and is not followed by a brace
+            let mut is_cmd = false;
+            if i > 0 {
+                let mut j = i - 1;
+                while j > 0 && chars[j].is_alphabetic() { j -= 1; }
+                if chars[j] == '\\' { is_cmd = true; }
+            }
+            
+            let next_is_brace = i + 1 < chars.len() && (chars[i+1] == '{' || chars[i+1] == '(');
+            if is_cmd && !next_is_brace {
+                cleaned.push(' ');
+            }
+        } else {
+            cleaned.push(chars[i]);
+        }
+        i += 1;
+    }
+
+    // Function to strip outer braces from a string if they are balanced
+    fn strip_balanced(s: &str) -> String {
+        if !s.starts_with('{') || !s.ends_with('}') { return s.to_string(); }
+        let mut count = 0;
+        for (i, c) in s.chars().enumerate() {
+            if c == '{' { count += 1; }
+            else if c == '}' {
+                count -= 1;
+                if count == 0 && i < s.len() - 1 { return s.to_string(); }
+            }
+        }
+        if count == 0 {
+            s[1..s.len()-1].to_string()
+        } else {
+            s.to_string()
+        }
+    }
+
+    // Strip only the outermost braces of the entire formula if balanced
+    let mut final_out = strip_balanced(&cleaned);
+
+    // Final "Paper Perfection" Step: Upgrade ( ... ) to \left( ... \right) if it contains a \frac
+    if final_out.contains("\\frac") && final_out.contains("(") && final_out.contains(")") {
+        final_out = final_out.replace("(", "\\left(").replace(")", "\\right)");
+    }
+
+    Ok(final_out.trim().to_string())
 }
 
 /// Table OCR — uses standard PaddleOCR with a heuristic to reconstruct the table structure.
@@ -210,10 +311,31 @@ pub fn perform_table_ocr(img: &DynamicImage) -> Result<String> {
         rows.push(vec![result]);
     }
 
+    // Find max columns
+    let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+
+    // If it's just a single column, don't use table formatting
+    if max_cols <= 1 {
+        let mut text = String::new();
+        for row in rows {
+            for res in row {
+                text.push_str(&res.text);
+                text.push(' ');
+            }
+            text.push('\n');
+        }
+        return Ok(text.trim().to_string());
+    }
+
     // Format as Markdown table
     let mut markdown = String::new();
     for (i, row) in rows.iter().enumerate() {
-        let row_text: Vec<String> = row.iter().map(|r| r.text.trim().to_string()).collect();
+        let mut row_text: Vec<String> = row.iter().map(|r| r.text.trim().to_string()).collect();
+        // Pad with empty strings to match max_cols
+        while row_text.len() < max_cols {
+            row_text.push("".to_string());
+        }
+
         markdown.push_str("| ");
         markdown.push_str(&row_text.join(" | "));
         markdown.push_str(" |\n");
@@ -221,7 +343,7 @@ pub fn perform_table_ocr(img: &DynamicImage) -> Result<String> {
         if i == 0 {
             // Add separator
             markdown.push('|');
-            for _ in 0..row.len() {
+            for _ in 0..max_cols {
                 markdown.push_str(" --- |");
             }
             markdown.push('\n');
@@ -276,7 +398,6 @@ mod tests {
 
         let home = std::env::var("HOME").expect("HOME env var not set");
         let image_path = PathBuf::from(&home).join("bloatshots/2026-04-28/23-27-49.png");
-        let target_path = PathBuf::from(&home).join("bloatshot/target_math.txt");
 
         if !image_path.exists() {
             println!("Test skipped: math formula image not found");
@@ -289,20 +410,33 @@ mod tests {
         println!("\n--- ACTUAL (-m math OCR) ---");
         println!("{}", result);
 
-        if target_path.exists() {
-            let expected =
-                fs::read_to_string(&target_path).expect("Failed to read target_math.txt");
-            println!("--- EXPECTED (from target_math.txt) ---");
-            println!("{}", expected);
-        }
-
         assert!(!result.is_empty(), "Math OCR produced empty string!");
-        // Check for key LaTeX elements in the formula
         assert!(
             result.contains("\\int") || result.contains("\\sum") || result.contains("\\frac"),
             "Math OCR output missing LaTeX commands. Got:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn test_attention_formula() {
+        crate::util::ensure_onnx_models().expect("Failed to download models");
+        let image_path = PathBuf::from("/home/alekstrautima/bloatshots/2026-04-29/22-32-51.png");
+
+        if !image_path.exists() {
+            println!("Test skipped: attention image not found");
+            return;
+        }
+
+        let img = image::open(&image_path).expect("Failed to open test image");
+        let result = perform_semantic_ocr(&img).expect("perform_semantic_ocr failed");
+
+        println!("\n--- ATTENTION OCR RESULT ---");
+        println!("{}", result);
+
+        assert!(result.contains("Attention"), "Result missing 'Attention'");
+        assert!(result.contains("softmax"), "Result missing 'softmax'");
+        assert!(result.contains("QK"), "Result missing 'QK'");
     }
 
     #[test]

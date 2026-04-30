@@ -1,19 +1,32 @@
-/target
+/target/
 **/*.rs.bk
 .venv/
 rust-analyzer.json
+.vscode/
+.idea/
 
-# Whitelist specific markdown files
+# Whitelist specific documentation files
 *.md
 !README.md
 !CONTRIBUTING.md
 !contributors.md
 
-# Internal documentation
-/docs/
-
-# Arch Linux build artifacts
+# Build Artifacts
+PKGBUILD.local
 *.pkg.tar.zst
+*.pkg.tar.xz
 /pkg/
 /src/bloatshot/
 /bloatshot/
+/local_src/
+/scratch/
+
+# Models (downloaded at runtime)
+*.onnx
+*.mnn
+ppocr_keys.txt
+math_tokenizer.json
+
+# Screenshots and temp files
+bloatshot_*.png
+.lock
